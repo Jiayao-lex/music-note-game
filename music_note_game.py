@@ -20,20 +20,60 @@ pygame.display.set_caption("Music Note Recognition Game")
 clock = pygame.time.Clock()
 
 # --- 音频生成函数 ---
-def generate_tone(frequency, duration=0.5, sample_rate=22050):
-    """生成指定频率的正弦波音调"""
+def generate_tone(frequency, duration=0.8, sample_rate=22050):
+    """生成模拟钢琴音色的音调"""
     n_samples = int(duration * sample_rate)
     t = np.linspace(0, duration, n_samples, False)
-    # 生成正弦波
-    wave = np.sin(frequency * 2 * np.pi * t)
-    # 添加包络线（淡入淡出）避免爆音
-    fade_len = int(0.05 * sample_rate)  # 50ms淡入淡出
-    fade_in = np.linspace(0, 1, fade_len)
-    fade_out = np.linspace(1, 0, fade_len)
-    wave[:fade_len] *= fade_in
-    wave[-fade_len:] *= fade_out
-    # 转换为16位整数
-    wave = (wave * 32767).astype(np.int16)
+    
+    # 钢琴音色由多个谐波组成（基频 + 泛音）
+    # 每个谐波的振幅不同，模拟真实钢琴的频谱
+    harmonics = [
+        (1.0, 1.0),      # 基频，最强
+        (2.0, 0.5),      # 第2谐波
+        (3.0, 0.25),     # 第3谐波
+        (4.0, 0.15),     # 第4谐波
+        (5.0, 0.1),      # 第5谐波
+        (6.0, 0.05),     # 第6谐波
+    ]
+    
+    # 叠加所有谐波
+    wave = np.zeros(n_samples)
+    for harmonic_ratio, amplitude in harmonics:
+        wave += amplitude * np.sin(frequency * harmonic_ratio * 2 * np.pi * t)
+    
+    # ADSR 包络（Attack-Decay-Sustain-Release）模拟钢琴击弦特性
+    attack_time = 0.005   # 5ms 快速起音
+    decay_time = 0.1      # 100ms 衰减
+    sustain_level = 0.6   # 持续音量 60%
+    release_time = 0.3    # 300ms 释放
+    
+    attack_samples = int(attack_time * sample_rate)
+    decay_samples = int(decay_time * sample_rate)
+    release_samples = int(release_time * sample_rate)
+    sustain_samples = n_samples - attack_samples - decay_samples - release_samples
+    
+    # 构建 ADSR 包络
+    envelope = np.zeros(n_samples)
+    
+    # Attack: 从 0 快速升到 1
+    envelope[:attack_samples] = np.linspace(0, 1, attack_samples)
+    
+    # Decay: 从 1 衰减到 sustain_level
+    envelope[attack_samples:attack_samples+decay_samples] = np.linspace(1, sustain_level, decay_samples)
+    
+    # Sustain: 保持在 sustain_level
+    envelope[attack_samples+decay_samples:attack_samples+decay_samples+sustain_samples] = sustain_level
+    
+    # Release: 从 sustain_level 衰减到 0
+    envelope[-release_samples:] = np.linspace(sustain_level, 0, release_samples)
+    
+    # 应用包络到波形
+    wave *= envelope
+    
+    # 归一化并转换为16位整数
+    wave = wave / np.max(np.abs(wave))  # 归一化到 -1 到 1
+    wave = (wave * 32767 * 0.5).astype(np.int16)  # 降低音量到 50%
+    
     # 创建立体声（复制单声道）
     stereo_wave = np.column_stack((wave, wave))
     return pygame.sndarray.make_sound(stereo_wave)
