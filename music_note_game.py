@@ -4,6 +4,7 @@ import random
 import os
 import math
 import pathlib
+import numpy as np
 
 # --- 公共配置 ---
 WIDTH, HEIGHT = 900, 600
@@ -13,9 +14,96 @@ RED = (220, 60, 60)
 BLUE = (80, 120, 220)
 
 pygame.init()
+pygame.mixer.init(frequency=22050, size=-16, channels=1, buffer=512)
 screen = pygame.display.set_mode((WIDTH, HEIGHT))
 pygame.display.set_caption("Music Note Recognition Game")
 clock = pygame.time.Clock()
+
+# --- 音频生成函数 ---
+def generate_tone(frequency, duration=0.5, sample_rate=22050):
+    """生成指定频率的正弦波音调"""
+    n_samples = int(duration * sample_rate)
+    t = np.linspace(0, duration, n_samples, False)
+    # 生成正弦波
+    wave = np.sin(frequency * 2 * np.pi * t)
+    # 添加包络线（淡入淡出）避免爆音
+    fade_len = int(0.05 * sample_rate)  # 50ms淡入淡出
+    fade_in = np.linspace(0, 1, fade_len)
+    fade_out = np.linspace(1, 0, fade_len)
+    wave[:fade_len] *= fade_in
+    wave[-fade_len:] *= fade_out
+    # 转换为16位整数
+    wave = (wave * 32767).astype(np.int16)
+    # 创建立体声（复制单声道）
+    stereo_wave = np.column_stack((wave, wave))
+    return pygame.sndarray.make_sound(stereo_wave)
+
+# 音符到频率的映射（A4 = 440Hz）
+NOTE_FREQUENCIES = {
+    'C4': 261.63, 'D4': 293.66, 'E4': 329.63, 'F4': 349.23,
+    'G4': 392.00, 'A4': 440.00, 'B4': 493.88,
+    'C5': 523.25, 'D5': 587.33, 'E5': 659.25, 'F5': 698.46,
+    'G5': 783.99, 'A5': 880.00,
+    # 低音谱号音符
+    'E2': 82.41, 'F2': 87.31, 'G2': 98.00, 'A2': 110.00, 'B2': 123.47,
+    'C3': 130.81, 'D3': 146.83, 'E3': 164.81,
+    'F3': 174.61, 'G3': 196.00, 'A3': 220.00, 'B3': 246.94
+}
+
+# 预生成所有音符的声音
+print("Generating note sounds...")
+NOTE_SOUNDS = {note: generate_tone(freq) for note, freq in NOTE_FREQUENCIES.items()}
+print("Sound generation complete!")
+
+
+# --- 烟花粒子类 ---
+class Particle:
+    def __init__(self, x, y, color):
+        self.x = x
+        self.y = y
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(2, 8)
+        self.vx = math.cos(angle) * speed
+        self.vy = math.sin(angle) * speed
+        self.color = color
+        self.life = 60  # 存活帧数
+        self.gravity = 0.15
+        
+    def update(self):
+        self.vx *= 0.98
+        self.vy += self.gravity
+        self.x += self.vx
+        self.y += self.vy
+        self.life -= 1
+        
+    def draw(self, screen):
+        if self.life > 0:
+            alpha = int(255 * (self.life / 60))
+            size = max(1, int(4 * (self.life / 60)))
+            pygame.draw.circle(screen, self.color, (int(self.x), int(self.y)), size)
+
+class Firework:
+    def __init__(self, x, y):
+        self.x = x
+        self.y = y
+        self.particles = []
+        colors = [(255, 50, 50), (50, 255, 50), (50, 50, 255), 
+                  (255, 255, 50), (255, 50, 255), (50, 255, 255)]
+        color = random.choice(colors)
+        for _ in range(50):
+            self.particles.append(Particle(x, y, color))
+    
+    def update(self):
+        for particle in self.particles:
+            particle.update()
+        self.particles = [p for p in self.particles if p.life > 0]
+    
+    def draw(self, screen):
+        for particle in self.particles:
+            particle.draw(screen)
+    
+    def is_finished(self):
+        return len(self.particles) == 0
 
 # Helper for PyInstaller --onefile: resource_path will return
 # the path to bundled resources when running inside a PyInstaller
@@ -130,6 +218,9 @@ def run_treble():
     running = True
     feedback = None
     feedback_time = 0
+    fireworks = []  # 烟花列表
+    last_firework_score = 0  # 上次触发烟花的分数
+    # 不自动播放初始音符，等待用户交互
     # 不显示谱号图片
     while running:
         screen.fill(WHITE)
@@ -149,7 +240,7 @@ def run_treble():
                 y = STAFF_Y - LINE_SPACING * i
                 pygame.draw.line(screen, BLACK, (note_x - 18, y), (note_x + 18, y), 2)
         font = pygame.font.Font(None, 36)
-        text = font.render(f"Score: {score} | Which note? Press 1-7 (C=1, D=2...) | {note_names[current_note]}", True, BLACK)
+        text = font.render(f"Score: {score} | Which note? Press 1-7 (C=1, D=2...) | Press SPACE to hear", True, BLACK)
         screen.blit(text, (40, 20))
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
@@ -157,18 +248,40 @@ def run_treble():
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return
+                # 按空格键播放当前音符
+                if event.key == pygame.K_SPACE:
+                    if note_names[current_note] in NOTE_SOUNDS:
+                        NOTE_SOUNDS[note_names[current_note]].play()
                 if pygame.K_1 <= event.key <= pygame.K_7:
                     guess = event.key - pygame.K_1
                     if note_labels[guess] == note_labels[current_note]:
                         score += 1
                         feedback = font.render("Correct!", True, RED)
+                        # 答对后播放当前音符（反馈音）
+                        if note_names[current_note] in NOTE_SOUNDS:
+                            NOTE_SOUNDS[note_names[current_note]].play()
                         current_note = random.choice(range(len(note_names)))
+                        # 每得10分触发烟花
+                        if score % 10 == 0 and score > last_firework_score:
+                            for _ in range(3):  # 同时发射3个烟花
+                                fw_x = random.randint(200, WIDTH - 200)
+                                fw_y = random.randint(150, 350)
+                                fireworks.append(Firework(fw_x, fw_y))
+                            last_firework_score = score
                     else:
+                        # 答错后播放正确的音符（让用户听到正确答案）
+                        if note_names[current_note] in NOTE_SOUNDS:
+                            NOTE_SOUNDS[note_names[current_note]].play()
                         feedback = font.render(f"Wrong! It was {note_labels[current_note]}", True, RED)
                     feedback_time = pygame.time.get_ticks()
         if feedback and pygame.time.get_ticks() - feedback_time < 1000:
             feedback_rect = feedback.get_rect(center=(WIDTH // 2, HEIGHT - 40))
             screen.blit(feedback, feedback_rect)
+        # 更新和绘制烟花
+        for firework in fireworks:
+            firework.update()
+            firework.draw(screen)
+        fireworks = [fw for fw in fireworks if not fw.is_finished()]
         pygame.display.flip()
         clock.tick(60)
 
@@ -184,23 +297,33 @@ def run_bass():
         return STAFF_BOTTOM - line_idx * LINE_SPACING
     def space_y(below_line_idx):
         return (line_y(below_line_idx) + line_y(below_line_idx+1)) / 2
-    note_names = ['E2', 'C3', 'D3', 'E3', 'F3', 'G3', 'A3', 'B3', 'C4']
+    
+    # 低音谱号标准音符位置
+    # 从下到上：第1线=G2, 第2线=B2, 第3线=D3, 第4线=F3, 第5线=A3
+    note_names = ['E2', 'F2', 'G2', 'A2', 'B2', 'C3', 'D3', 'E3', 'F3', 'G3', 'A3', 'B3', 'C4']
     note_positions = [
-        line_y(0) + LINE_SPACING,   # E2 下加一线
-        space_y(1),                 # C3 2间
-        line_y(2),                  # D3 3线
-        space_y(2),                 # E3 3间
-        line_y(3),                  # F3 4线
-        space_y(3),                 # G3 4间
-        line_y(4),                  # A3 5线
-        space_y(4),                 # B3 5线上加间
-        line_y(4) - LINE_SPACING    # C4 上加一线
+        line_y(0) + LINE_SPACING,     # E2 下加一线
+        space_y(-1) + LINE_SPACING,   # F2 下加一间（第1线下方的间）
+        line_y(0),                    # G2 第1线
+        space_y(0),                   # A2 第1间
+        line_y(1),                    # B2 第2线
+        space_y(1),                   # C3 第2间
+        line_y(2),                    # D3 第3线
+        space_y(2),                   # E3 第3间
+        line_y(3),                    # F3 第4线
+        space_y(3),                   # G3 第4间
+        line_y(4),                    # A3 第5线
+        space_y(4),                   # B3 第5线上方的间
+        line_y(4) - LINE_SPACING      # C4 上加一线
     ]
     score = 0
     current_note = random.randint(0, len(note_names)-1)
     running = True
     feedback = None
     feedback_time = 0
+    fireworks = []  # 烟花列表
+    last_firework_score = 0  # 上次触发烟花的分数
+    # 不自动播放初始音符，等待用户交互
     # 低音谱号图片
     # 使用 assets 路径并兼容 PyInstaller
     assets_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'assets')
@@ -239,37 +362,65 @@ def run_bass():
         if note_names[current_note] == 'C4':
             y = note_y
             pygame.draw.line(screen, BLACK, (note_x-22, y), (note_x+22, y), 2)
-        font2 = pygame.font.Font(None, 36)
-        text = font2.render(f"Score: {score} | 1-7 = C3~B3", True, BLACK)
+        font2 = pygame.font.Font(None, 32)
+        text = font2.render(f"Score: {score} | Keys 1-7 = C~B | Current octave shown | Press SPACE to hear", True, BLACK)
         screen.blit(text, (40, 20))
         font3 = pygame.font.Font(None, 28)
         info = font3.render("C=1  D=2  E=3  F=4  G=5  A=6  B=7", True, BLUE)
         screen.blit(info, (40, 60))
+        # 显示当前音符名称（用于调试）
+        debug_font = pygame.font.Font(None, 24)
+        debug_text = debug_font.render(f"Current: {note_names[current_note]}", True, (100, 100, 100))
+        screen.blit(debug_text, (40, 90))
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 return
             elif event.type == pygame.KEYDOWN:
                 if event.key == pygame.K_ESCAPE:
                     return
+                # 按空格键播放当前音符
+                if event.key == pygame.K_SPACE:
+                    if note_names[current_note] in NOTE_SOUNDS:
+                        NOTE_SOUNDS[note_names[current_note]].play()
                 if pygame.K_1 <= event.key <= pygame.K_7:
-                    guess = event.key - pygame.K_1
-                    if current_note == 0:
-                        correct = 2  # E2 = 3 (E)
-                    elif current_note == 8:
-                        correct = 0  # C4 = 1 (C)
-                    else:
-                        correct = current_note - 1
+                    guess = event.key - pygame.K_1  # 0=C, 1=D, 2=E, 3=F, 4=G, 5=A, 6=B
+                    # 获取当前音符的字母名称（忽略八度）
+                    current_note_name = note_names[current_note]
+                    note_letter = current_note_name[0]  # 取第一个字符，如 'C3' -> 'C'
+                    
+                    # 将字母转换为数字 (C=0, D=1, E=2, F=3, G=4, A=5, B=6)
+                    note_to_num = {'C': 0, 'D': 1, 'E': 2, 'F': 3, 'G': 4, 'A': 5, 'B': 6}
+                    correct = note_to_num.get(note_letter, -1)
+                    
                     if guess == correct:
                         score += 1
                         feedback = font2.render("Correct!", True, (0,180,0))
                         feedback_time = pygame.time.get_ticks()
+                        # 答对后播放当前音符（反馈音）
+                        if note_names[current_note] in NOTE_SOUNDS:
+                            NOTE_SOUNDS[note_names[current_note]].play()
                         current_note = random.randint(0, len(note_names)-1)
+                        # 每得10分触发烟花
+                        if score % 10 == 0 and score > last_firework_score:
+                            for _ in range(3):  # 同时发射3个烟花
+                                fw_x = random.randint(200, WIDTH - 200)
+                                fw_y = random.randint(150, 350)
+                                fireworks.append(Firework(fw_x, fw_y))
+                            last_firework_score = score
                     else:
+                        # 答错后播放正确的音符（让用户听到正确答案）
+                        if note_names[current_note] in NOTE_SOUNDS:
+                            NOTE_SOUNDS[note_names[current_note]].play()
                         feedback = font2.render(f"Wrong! {note_names[current_note]}", True, RED)
                         feedback_time = pygame.time.get_ticks()
         if feedback and pygame.time.get_ticks() - feedback_time < 1000:
             feedback_rect = feedback.get_rect(center=(WIDTH // 2, HEIGHT - 40))
             screen.blit(feedback, feedback_rect)
+        # 更新和绘制烟花
+        for firework in fireworks:
+            firework.update()
+            firework.draw(screen)
+        fireworks = [fw for fw in fireworks if not fw.is_finished()]
         pygame.display.flip()
         clock.tick(60)
 
